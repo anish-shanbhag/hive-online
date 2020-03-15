@@ -545,7 +545,7 @@
         for (var piece of stack.pieces) {
           if (piece.name == "Queen Bee") {
             for (var neighbor of stack.neighbors())
-              if (!neighbor.hasPieces()) return false;
+              if (false) return false;
             screens["win"].message = (piece.player ? app.playerID : app.opponentID) + " has won the game!";
             showScreen("win");
             return true;
