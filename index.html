@@ -1,0 +1,904 @@
+﻿<html>
+<head>
+  <link href="https://fonts.googleapis.com/css?family=Londrina+Solid:300,900&display=swap" rel="stylesheet">
+  <script src="https://cdn.jsdelivr.net/npm/peerjs@0.3.20/dist/peer.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/vue/dist/vue.js"></script>
+  <script>
+    class Stack {
+      constructor(x, y) {
+        this.x = x;
+        this.y = y;
+        this.pieces = [];
+      }
+      addPiece(name, player) {
+        this.pieces.splice(0, 0, new Piece(this, name, player));
+        this.neighbors(true);
+      }
+      hovered() {
+        var localMouse = screenToWorld(mouse.x, mouse.y);
+        localMouse.x -= this.x;
+        localMouse.y -= this.y;
+        var side = localMouse.y > 0 ? 1 : -1;
+        var left = side * localMouse.y / Math.sqrt(3) - 1;
+        var right = -side * localMouse.y / Math.sqrt(3) + 1;
+        return localMouse.x > left && localMouse.x < right && localMouse.y < Math.sqrt(3) / 2 && localMouse.y > -Math.sqrt(3) / 2;
+      }
+      neighbors(addToStacks = false) {
+        var neighbors = [];
+        var deltas = [1.5, Math.sqrt(3) / 2,
+          0, Math.sqrt(3),
+          -1.5, Math.sqrt(3) / 2,
+          -1.5, -Math.sqrt(3) / 2,
+          0, -Math.sqrt(3),
+          1.5, -Math.sqrt(3) / 2
+        ];
+        for (var i = 0; i < deltas.length; i += 2) {
+          var x = deltas[i] + this.x;
+          var y = deltas[i + 1] + this.y;
+          var neighbor = getStack(x, y);
+          if (neighbor != null) neighbors.push(neighbor);
+          else {
+            if (addToStacks) {
+              createStack(x, y);
+              neighbors.push(getStack(x, y));
+            } else neighbors.push(new Stack(x, y));
+          }
+        }
+        return neighbors;
+      }
+      top() {
+        return this.hasPieces() ? this.pieces[0] : null;
+      }
+      hasPieces() {
+        return this.pieces.length > 0;
+      }
+      touchingHive() {
+        for (var neighbor of this.neighbors())
+          if (neighbor.hasPieces()) return true;
+        return false;
+      }
+      unobstructedNeighbors() {
+        var neighbors = this.neighbors();
+        var unobstructedNeighbors = [];
+        for (var i = 0; i < 6; i++) {
+          var neighbor = neighbors[i];
+          if (!neighbor.hasPieces()) {
+            var left = i == 0 ? neighbors[neighbors.length - 1] : neighbors[i - 1];
+            var right = i == neighbors.length - 1 ? neighbors[0] : neighbors[i + 1];
+            if (!left.hasPieces() || !right.hasPieces()) unobstructedNeighbors.push(neighbor);
+          }
+        }
+        return unobstructedNeighbors;
+      }
+      getValidMoves() {
+        if (!this.hasPieces() || !this.top().player) return [];
+        for (var stack of stacks) {
+          if (stack != this && stack.hasPieces()) {
+            var neighborTree = [];
+            var newNeighbors = [stack];
+            while (newNeighbors.length > 0) {
+              neighborTree = neighborTree.concat(newNeighbors);
+              var upcomingNeighbors = [];
+              for (var newNeighbor of newNeighbors) {
+                for (var upcomingNeighbor of newNeighbor.neighbors()) {
+                  if (upcomingNeighbor.hasPieces() && !neighborTree.includes(upcomingNeighbor) && !upcomingNeighbors
+                    .includes(upcomingNeighbor) && upcomingNeighbor != this) upcomingNeighbors.push(upcomingNeighbor);
+                }
+              }
+              newNeighbors = upcomingNeighbors;
+            }
+            for (var checkingStack of stacks) {
+              if (!neighborTree.includes(checkingStack) && checkingStack != this && checkingStack.hasPieces())
+              return [];
+            }
+          }
+        }
+        return app.pieceInfo[this.top().name].getValidMoves(this);
+      }
+      pathsAroundHive(amount, topOfHive) {
+        var steps = [
+          [this]
+        ];
+        for (var i = 0; amount == -1 ? true : i < amount; i++) {
+          steps.push([]);
+          if (steps[i].length == 0) break;
+          for (var step of steps[i]) {
+            for (var neighbor of step.neighbors()) {
+              if (neighbor.hasPieces() && neighbor != this) {
+                for (var currentNeighbor of step.unobstructedNeighbors()) {
+                  neighborOfNeighborLoop:
+                    for (var neighborOfNeighbor of neighbor.neighbors()) {
+                      if (neighborOfNeighbor.hasPieces()) continue;
+                      if (neighborOfNeighbor == this) continue;
+                      for (var j = 0; j < i; j++) {
+                        if (steps[j].includes(neighborOfNeighbor)) continue neighborOfNeighborLoop;
+                      }
+                      if (neighborOfNeighbor == currentNeighbor) steps[i + 1].push(neighborOfNeighbor);
+                    }
+                }
+              }
+            }
+          }
+        }
+        if (amount == -1) {
+          var validMoves = [];
+          for (var level of steps) {
+            for (var step of level) {
+              validMoves.push(step);
+            }
+          }
+          return validMoves;
+        } else return steps[amount];
+      }
+    }
+    class Piece {
+      constructor(stack, name, player) {
+        this.stack = stack;
+        this.name = name;
+        this.player = player;
+      }
+    }
+    class PieceInfo {
+      constructor(name, amount, getValidMoves) {
+        this.name = name;
+        this.image = loadImage(name);
+        this.playerAmount = amount;
+        this.opponentAmount = amount;
+        this.getValidMoves = getValidMoves;
+      }
+    }
+    class Screen {
+      constructor(message, returnScreen = null, loading = false) {
+        this.message = message;
+        this.returnScreen = returnScreen;
+        this.loading = loading;
+      }
+    }
+    var app, player, opponent, connection;
+    var canvas, ctx;
+    var mouse = {
+      x: 0,
+      y: 0
+    };
+    var camera = {
+      x: 0,
+      y: 0,
+      zoom: 40
+    };
+    var pressedKeys = [];
+    var lastFrame;
+    var stacks = [];
+    var hovered = null;
+    var playerTurn = 0;
+    var opponentTurn = 0;
+    var current = null;
+    var lastMove = null;
+    var valid = [];
+    var playerOutline, opponentOutline, validImage, currentImage, hoverImage, lastMoveImage;
+    const key = "gzfJ0tlnvq1k3yHKYZaB";
+    var screens = {
+      "home": new Screen("Welcome to Hive Online!"),
+      "rules": new Screen("The rules page is coming soon!", "home"),
+      "enterID": new Screen("Choose a custom player ID to continue:"),
+      "invalid-id": new Screen("The player ID you entered has invalid characters. Please try a different player ID.",
+        "enterID"),
+      "unavailable-id": new Screen(
+        "The player ID you entered is already taken by another player. Please try a different player ID.", "enterID"
+        ),
+      "tryingID": new Screen("Trying to connect using the player ID you entered...", null, true),
+      "choose": new Screen("Please choose whether you would like to host a game or join a game."),
+      "host": new Screen(
+        "Tell your opponent your player ID so that they can join your game.<br/>Waiting for a player to join you...",
+        null, true),
+      "join": new Screen("Ask your opponent for their player ID and enter it below:"),
+      "tryJoin": new Screen("Trying to connect to %...", null, true),
+      "waiting": new Screen("Successfully connected to %. Waiting for them to accept your request to join...", null,
+        true),
+      "ownID": new Screen(
+        "You've entered your own player ID. Please enter someone else's player ID to join their game.", "join"),
+      "peer-unavailable": new Screen(
+        "The player you're trying to connect to does not exist. Please try a different player ID.", "join"),
+      "request": new Screen("% wants to join your game. Would you like to accept their request?"),
+      "declined": new Screen("Unfortunately, % has declined your request to join their game.", "join"),
+      "disconnected": new Screen("Unfortunately, % has disconnected from you.", "choose"),
+      "inGame": new Screen("Sorry, but the player you're attempting to connect to is already in a game.", "join"),
+      "playerBlank": new Screen("You haven't entered a player ID. Please choose a player ID.", "enterID"),
+      "opponentBlank": new Screen("You haven't entered a player ID to connect to. Please enter a valid player ID.",
+        "join"),
+      "win": new Screen(""),
+    }
+    window.onload = function () {
+      app = new Vue({
+        el: "#app",
+        data: {
+          screen: "",
+          loading: false,
+          message: "",
+          playerID: "",
+          playerConnected: false,
+          opponentID: "",
+          currentTurn: null,
+          validPieces: [],
+          currentPiece: null,
+          pieceInfo: {
+            "Queen Bee": new PieceInfo("Queen Bee", 1, (stack) => {
+              return stack.unobstructedNeighbors();
+            }),
+            "Beetle": new PieceInfo("Beetle", 2, (stack) => {
+              var validMoves = [];
+              for (var unobstructedNeighbor of stack.unobstructedNeighbors()) validMoves.push(
+                unobstructedNeighbor);
+              for (var neighbor of stack.neighbors())
+                if (neighbor.hasPieces() && !validMoves.includes(neighbor)) validMoves.push(neighbor);
+              return validMoves;
+            }),
+            "Grasshopper": new PieceInfo("Grasshopper", 3, (stack) => {
+              var validMoves = [];
+              for (var neighbor of stack.neighbors()) {
+                if (neighbor.hasPieces()) {
+                  var deltaX = neighbor.x - stack.x;
+                  var deltaY = neighbor.y - stack.y;
+                  var nextStack = neighbor;
+                  while (nextStack.hasPieces()) nextStack = getStack(nextStack.x + deltaX, nextStack.y +
+                    deltaY);
+                  validMoves.push(nextStack);
+                }
+              }
+              return validMoves;
+            }),
+            "Spider": new PieceInfo("Spider", 2, (stack) => {
+              return stack.pathsAroundHive(3);
+            }),
+            "Ant": new PieceInfo("Ant", 3, (stack) => {
+              return stack.pathsAroundHive(-1);
+            }),
+            "Ladybug": new PieceInfo("Ladybug", 1, (stack) => {
+              var steps = [
+                [stack],
+                [],
+                [],
+                []
+              ];
+              function getSteps(index, hasPieces) {
+                for (var step of steps[index]) {
+                  for (var neighbor of step.neighbors()) {
+                    if (neighbor.hasPieces() == hasPieces && neighbor != stack) steps[index + 1].push(
+                      neighbor);
+                  }
+                }
+              }
+              getSteps(0, true);
+              getSteps(1, true);
+              getSteps(2, false);
+              return steps[3];
+            }),
+          }
+        },
+        methods: {
+          selectPiece: function (piece) {
+            if (this.validPieces.includes(piece)) {
+              if (current instanceof Stack) {
+                placePiece(current, piece);
+              } else {
+                if (piece != current) {
+                  current = piece;
+                  app.currentPiece = piece;
+                } else current = null;
+              }
+            }
+          }
+        },
+      });
+      showScreen("home");
+    }
+    function createPlayer() {
+      showScreen("tryingID");
+      if (app.playerID == "") {
+        showScreen("playerBlank");
+        return;
+      }
+      player = new Peer(app.playerID + key);
+      player.on("open", () => {
+        app.playerConnected = true;
+        showScreen("choose");
+      });
+      player.on("connection", incoming => {
+        if (app.screen == "game") incoming.on("open", () => incoming.send("inGame"));
+        else {
+          setupConnection(incoming, () => showScreen("request"));
+          app.opponentID = connection.peer.substring(0, connection.peer.indexOf(key));
+        }
+      });
+      player.on("error", error => showScreen(error.type));
+    }
+    function tryJoin() {
+      if (app.playerID == app.opponentID) {
+        showScreen("ownID");
+        return;
+      } else if (app.opponentID == "") {
+        showScreen("opponentBlank");
+        return;
+      }
+      showScreen("tryJoin");
+      setupConnection(player.connect(app.opponentID + key), () => showScreen("waiting"));
+    }
+    function setupConnection(newConnection, open) {
+      connection = newConnection;
+      connection.on("open", open);
+      connection.on("data", data => {
+        var message = data.split("%");
+        switch (message[0]) {
+          case "accept":
+            startGame();
+            break;
+          case "decline":
+            showScreen("declined");
+            break;
+          case "inGame":
+            showScreen("inGame");
+            break;
+          case "turn":
+            startTurn(message[1] == "true");
+            break;
+          case "place":
+            var stack = getStack(parseFloat(message[1]), parseFloat(message[2]))
+            stack.addPiece(message[3]);
+            app.pieceInfo[message[3]].opponentAmount--;
+            lastMove = stack;
+            switchTurn();
+            break;
+          case "move":
+            var from = getStack(message[1], message[2]);
+            var to = getStack(message[3], message[4]);
+            to.addPiece(from.top().name);
+            from.pieces.splice(0, 1);
+            lastMove = to;
+            switchTurn();
+            break;
+        }
+      });
+      connection.on("close", () => showScreen("disconnected"));
+    }
+    function showScreen(name, customMessage) {
+      app.message = screens[name].message.replace("%", app.opponentID);
+      app.loading = screens[name].loading;
+      if (screens[name].returnScreen == null) app.screen = name;
+      else app.screen = "error:" + name;
+    }
+    function closeError() {
+      showScreen(screens[app.screen.split(":")[1]].returnScreen);
+    }
+    function accept() {
+      connection.send("accept");
+      startGame();
+    }
+    function decline() {
+      connection.send("decline");
+      showScreen("host");
+    }
+    function startGame() {
+      app.message = "";
+      app.loading = false;
+      app.screen = "game";
+      setTimeout(init, 500);
+    }
+    function init() {
+      canvas = document.getElementById("canvas");
+      canvas.width = document.body.clientWidth;
+      canvas.height = document.body.clientHeight;
+      window.addEventListener("mousemove", mouseMove, false);
+      window.addEventListener("mousewheel", scroll, {
+        passive: false
+      });
+      window.addEventListener("mousedown", click, false);
+      window.addEventListener("keydown", keydown, false);
+      window.addEventListener("keyup", keyup, false);
+      ctx = canvas.getContext("2d");
+      for (pieceName in app.playerPieces) eval(pieceName).image = loadImage(pieceName);
+      playerOutline = loadImage("playerOutline");
+      opponentOutline = loadImage("opponentOutline");
+      validImage = loadImage("valid");
+      currentImage = loadImage("current");
+      hoverImage = loadImage("hover");
+      lastMoveImage = loadImage("lastMove");
+      lastFrame = Date.now();
+      createStack(0, 0);
+      if (app.playerID > app.opponentID) {
+        app.currentTurn = Math.random() > 0.5;
+        connection.send("turn" + "%" + app.currentTurn);
+        startTurn(!app.currentTurn);
+      }
+      window.requestAnimationFrame(loop);
+    }
+    function loop() {
+      update((Date.now() - lastFrame) / 1000);
+      render();
+      lastFrame = Date.now();
+      if (app.screen == "game") window.requestAnimationFrame(loop);
+      else document.body.style.cursor = "default";
+    }
+    function update(delta) {
+      camera.x += (pressedKeys.includes(65) ? 200 : 0 + pressedKeys.includes(68) ? -200 : 0) * delta / camera.zoom;
+      camera.y += (pressedKeys.includes(83) ? 200 : 0 + pressedKeys.includes(87) ? -200 : 0) * delta / camera.zoom;
+      hovered = null;
+      for (var stack of stacks) {
+        if (stack.hovered() && valid.includes(stack)) hovered = stack;
+      }
+      document.body.style.cursor = hovered == null ? "default" : "pointer";
+    }
+    function render() {
+      ctx.globalAlpha = 1;
+      ctx.fillStyle = "#FFFFFF";
+      ctx.fillRect(0, 0, canvas.width, canvas.height);
+      for (var stack of stacks) {
+        stack.pieces.forEach((piece, index) => {
+          var width = 10 / (index + 5);
+          var alpha = stack.pieces.length > 1 ? Math.max(0.8 - index * 0.4, 0.4) : 1;
+          drawImage(app.pieceInfo[piece.name].image, piece.stack, alpha, width);
+          drawImage(piece.player ? playerOutline : opponentOutline, stack, alpha, width);
+        });
+      }
+      for (var stack of valid) {
+        if (stack != current) drawImage(validImage, stack, stack.hasPieces() ? 0.6 : 0.9);
+      }
+      if (current instanceof Stack) drawImage(currentImage, current, current.hasPieces() ? 0.6 : 0.9);
+      if (hovered != null) drawImage(hoverImage, hovered, 1);
+      if (lastMove != null) drawImage(lastMoveImage, lastMove, 0.5);
+    }
+    function loadImage(name) {
+      var image = new Image();
+      image.src = "resources/" + name + ".png";
+      return image;
+    }
+    function drawImage(image, stack, alpha, width = 2) {
+      if (image.complete) {
+        var screenPos = worldToScreen(stack.x - width / 2, stack.y + width / 2);
+        ctx.globalAlpha = alpha;
+        ctx.drawImage(image, screenPos.x, screenPos.y, width * camera.zoom, width * camera.zoom);
+      }
+    }
+    function screenToWorld(x, y) {
+      var worldX = (x - canvas.width / 2) / camera.zoom - camera.x;
+      var worldY = -((y - canvas.height / 2) / camera.zoom + camera.y);
+      return {
+        x: worldX,
+        y: worldY
+      };
+    }
+    function worldToScreen(x, y) {
+      var screenX = (x + camera.x) * camera.zoom + canvas.width / 2;
+      var screenY = (-y - camera.y) * camera.zoom + canvas.height / 2;
+      return {
+        x: screenX,
+        y: screenY
+      };
+    }
+    function mouseMove(event) {
+      var rect = canvas.getBoundingClientRect();
+      mouse.x = event.clientX - rect.left;
+      mouse.y = event.clientY - rect.top;
+    }
+    function scroll(event) {
+      if (event.wheelDelta > 0) {
+        if (camera.zoom < 200) camera.zoom += 10;
+      } else if (camera.zoom > 10) camera.zoom -= 10;
+      event.preventDefault();
+    }
+    function keydown(event) {
+      if (!pressedKeys.includes(event.keyCode)) pressedKeys.push(event.keyCode);
+    }
+    function keyup(event) {
+      pressedKeys.splice(pressedKeys.indexOf(event.keyCode), 1);
+    }
+    function click(event) {
+      if (hovered != null) {
+        if (current == null) {
+          if (hovered.hasPieces()) {
+            current = hovered;
+            valid = current.getValidMoves();
+            valid.push(current);
+          } else {
+            current = hovered;
+            changeSidebar('player', 'extend');
+          }
+        } else if (current instanceof Stack) {
+          if (hovered == current) {
+            current = null;
+            getValid();
+            changeSidebar("player", "retract");
+          } else {
+            if (current.hasPieces()) {
+              var top = current.top();
+              current.pieces.splice(0);
+              hovered.addPiece(top.name, true);
+              connection.send("move" + "%" + current.x + "%" + current.y + "%" + hovered.x + "%" + hovered.y);
+              switchTurn();
+            } else {
+              current = hovered;
+              changeSidebar('player', 'extend');
+            }
+          }
+        } else placePiece(hovered, current);
+      }
+    }
+    function createStack(x, y) {
+      stacks.push(new Stack(x, y));
+    }
+    function getStack(x, y) {
+      for (var stack of stacks)
+        if (Math.abs(stack.x - x) < 0.01 && Math.abs(stack.y - y) < 0.01) return stack;
+      return null;
+    }
+    function placePiece(stack, piece) {
+      stack.addPiece(piece, true);
+      app.pieceInfo[piece].playerAmount--;
+      changeSidebar("player", "retract");
+      connection.send("place" + "%" + stack.x + "%" + stack.y + "%" + piece);
+      switchTurn();
+    }
+    function switchTurn() {
+      if (checkWin()) showScreen("win");
+      else startTurn(!app.currentTurn);
+    }
+    function checkWin() {
+      for (var stack of stacks) {
+        for (var piece of stack.pieces) {
+          if (piece.name == "Queen Bee") {
+            for (var neighbor of stack.neighbors())
+              if (!neighbor.hasPieces()) return false;
+            screens["win"].message = (piece.player ? app.playerID : app.opponentID) + " has won the game!";
+            showScreen("win");
+            return true;
+          }
+        }
+      }
+    }
+    function startTurn(player) {
+      if (player) {
+        playerTurn++;
+        getValid();
+      } else {
+        opponentTurn++;
+        current = null;
+        valid = [];
+        lastMove = null;
+        app.validPieces = [],
+          app.currentPiece = null;
+      }
+      app.currentTurn = player;
+    }
+    function getValid() {
+      var hasToPlaceQueenBee = playerTurn == 4 && app.pieceInfo["Queen Bee"].playerAmount == 1;
+      app.validPieces = hasToPlaceQueenBee ? ["Queen Bee"] : ["Queen Bee", "Beetle", "Grasshopper", "Spider", "Ant",
+        "Ladybug"
+      ];
+      valid = [];
+      for (var stack of stacks) {
+        if (stack.hasPieces()) {
+          if (stack.top().player && stack.getValidMoves().length > 0 && !hasToPlaceQueenBee) valid.push(stack);
+        } else {
+          if (playerTurn == 1) valid.push(stack);
+          else if (stack.touchingHive()) {
+            var neighboringOpponentPiece = false;
+            for (var neighbor of stack.neighbors()) {
+              var top = neighbor.top();
+              if (top != null) {
+                if (!top.player) neighboringOpponentPiece = true;
+              }
+            }
+            if (!neighboringOpponentPiece) valid.push(stack);
+          }
+        }
+      }
+    }
+    function changeSidebar(player, type) {
+      var classList = document.getElementById(player + "SidebarPositioner").classList;
+      if (type == "toggle") {
+        if (classList.contains(player + "SidebarPositionerRetracted")) classList.replace(player +
+          "SidebarPositionerRetracted", player + "SidebarPositionerExtended");
+        else classList.replace(player + "SidebarPositionerExtended", player + "SidebarPositionerRetracted");
+      } else if (type == "extend") classList.replace(player + "SidebarPositionerRetracted", player +
+        "SidebarPositionerExtended");
+      else classList.replace(player + "SidebarPositionerExtended", player + "SidebarPositionerRetracted");
+    }
+  </script>
+  <style>
+    * {
+      font-family: 'Londrina Solid', cursive;
+      font-weight: 300;
+      text-align: center;
+      margin: 0px;
+      padding: 0px;
+      overflow: hidden;
+    }
+    *:focus {
+      outline: none;
+    }
+    #overlay {
+      position: absolute;
+      width: 100%;
+      height: 100%;
+      top: 24px;
+    }
+    .sidebarPositioner {
+      position: absolute;
+      overflow: visible;
+    }
+    .playerSidebarPositionerExtended {
+      right: 200px;
+      transition: 0.5s;
+    }
+    .playerSidebarPositionerRetracted {
+      right: 0px;
+      transition: 0.5s;
+    }
+    .opponentSidebarPositionerExtended {
+      left: 200px;
+      transition: 0.5s;
+    }
+    .opponentSidebarPositionerRetracted {
+      left: 0px;
+      transition: 0.5s;
+    }
+    #playerSidebarContainer {
+      text-align: right;
+    }
+    #opponentSidebarContainer {
+      text-align: left;
+    }
+    #playerSidebarButton {
+      background-color: dodgerblue;
+      border-top-left-radius: 24px;
+      border-bottom-left-radius: 24px;
+    }
+    #opponentSidebarButton {
+      background-color: crimson;
+      border-top-right-radius: 24px;
+      border-bottom-right-radius: 24px;
+    }
+    .sidebarButton {
+      padding: 16px;
+      border: 0px;
+      cursor: hand;
+      transition: 0.4s;
+      z-index: 1;
+    }
+    #playerSidebarButton:hover {
+      background-color: lightskyblue;
+    }
+    #opponentSidebarButton:hover {
+      background-color: lightcoral;
+    }
+    .sidebarButtonInnerTurn {
+      background-color: lightgreen;
+    }
+    .sidebarButtonInnerNotTurn {
+      background-color: lightgray;
+    }
+    .sidebarButtonInner {
+      padding: 12px;
+      font-size: 32px;
+      border-radius: 16px;
+    }
+    #playerPiecesMenu {
+      border-bottom-left-radius: 24px;
+      border-color: dodgerblue;
+    }
+    #opponentPiecesMenu {
+      border-bottom-right-radius: 24px;
+      right: 100%;
+      border-color: crimson;
+    }
+    .piecesMenu {
+      width: 200px;
+      height: 800px;
+      display: inline-block;
+      position: absolute;
+      top: 0px;
+      background-color: lightgray;
+      border: 8px solid black;
+      padding-top: 10px;
+    }
+    .pieceButton {
+      width: 85%;
+      text-align: left;
+      border: 5px solid;
+      border-color: black;
+      border-radius: 24px;
+      padding-bottom: 3px;
+      user-select: none;
+    }
+    .playerPieceButton {
+      margin: 3px 5px 3px -5px;
+    }
+    .opponentPieceButton {
+      margin: 3px -5px 3px 5px;
+    }
+    .validPieceButton {
+      border-color: #EEED90;
+      cursor: hand;
+      transition: 0.3s;
+    }
+    .validPieceButton:hover {
+      border-color: #b5f2b5;
+    }
+    .currentPieceButton {
+      border-color: lightgreen;
+      cursor: hand;
+      transition: 0.3s;
+    }
+    .invalidPieceButton {
+      border-color: black;
+    }
+    .pieceFigure {
+      position: relative;
+      float: left;
+      margin-left: 10px;
+      font-size: 20px;
+    }
+    .pieceImageContainer {
+      position: relative;
+    }
+    .pieceOutline {
+      position: absolute;
+      bottom: 5px;
+      left: 0px;
+    }
+    .piecesLeft {
+      position: relative;
+      top: 16px;
+      left: 6px;
+      font-size: 40px;
+    }
+    #title {
+      font-weight: 900;
+      font-size: 256px;
+      color: dodgerblue;
+      padding-top: 100px;
+      line-height: 200px;
+    }
+    #subtitle {
+      font-weight: 300;
+      font-size: 72px;
+      color: dodgerblue;
+    }
+    #playerID {
+      font-weight: 300;
+      font-size: 48px;
+      display: inline-block;
+      border: 8px solid dodgerblue;
+      border-radius: 24px;
+      padding: 16px;
+      margin-top: 36px;
+    }
+    #message {
+      margin-top: 48px;
+      margin-bottom: 16px;
+      font-size: 36px;
+    }
+    input[type="text"] {
+      font-size: 48px;
+      border: 8px solid grey;
+      border-radius: 24px;
+      padding: 16px;
+      margin-right: 8px;
+    }
+    .button {
+      font-size: 48px;
+      background-color: white;
+      border: 8px solid dodgerblue;
+      border-radius: 24px;
+      padding: 16px;
+      margin-left: 10px;
+      margin-right: 10px;
+      margin-top: 24px;
+      cursor: hand;
+      transition-duration: 0.4s;
+    }
+    .button:hover {
+      background-color: dodgerblue;
+      color: white;
+    }
+    #footer {
+      font-size: 24px;
+      position: absolute;
+      bottom: 20px;
+      width: 100%;
+      text-align: center;
+    }
+  </style>
+</head>
+<body>
+  <div id="app">
+    <div v-if="screen != 'game'">
+      <div id="title">HIVE</div>
+      <div id="subtitle">―online―</div>
+      <div id="playerID" v-if="playerConnected">Your player ID is: {{playerID}}</div>
+      <div id="message" v-html="message"></div>
+      <div v-if="screen == 'home'">
+        <button onclick="showScreen('enterID')" class="button">Play Game</button>
+        <button onclick="showScreen('rules')" class="button">Rules</button>
+        <div id="footer">Created by Anish Shanbhag for his 2019 AP Computer Science Principles Post AP Project
+        </div>
+      </div>
+      <div v-if="screen == 'enterID'">
+        <input type="text" v-model="playerID" />
+        <button onclick="createPlayer()" class="button">Confirm</button><br>
+        <button onclick="showScreen('home')" class="button">Back</button>
+      </div>
+      <div v-if="screen == 'choose'">
+        <button onclick="showScreen('host')" class="button">Host a Game</button>
+        <button onclick="showScreen('join')" class="button">Join a Game</button>
+      </div>
+      <div v-if="screen == 'join'">
+        <input type="text" v-model="opponentID" />
+        <button onclick="tryJoin()" class="button">Join Game</button>
+      </div>
+      <div v-if="screen == 'request'">
+        <button onclick="accept()" class="button">Accept</button>
+        <button onclick="decline()" class="button">Decline</button>
+      </div>
+      <div v-if="screen.includes('error')">
+        <button onclick="closeError()" class="button">Ok</button>
+      </div>
+      <div id="loading" v-if="loading">
+        <img src="resources/loading.svg" style="margin-bottom: 16px" />
+      </div>
+      <div v-if="screen == 'host' || screen == 'join'">
+        <button onclick="showScreen('choose')" style="margin-top: 36px" class="button">Cancel</button>
+      </div>
+      <div v-if="screen == 'win'">
+        <button onclick="location.reload()" class="button">Ok</button>
+      </div>
+    </div>
+    <div v-if="screen == 'game'">
+      <canvas id="canvas"></canvas>
+      <div id="overlay">
+        <div id="playerSidebarPositioner" class="playerSidebarPositionerRetracted sidebarPositioner">
+          <div id="playerSidebarContainer" class="sidebarContainer">
+            <button id="playerSidebarButton" class="sidebarButton" onclick="changeSidebar('player', 'toggle')">
+              <div :class="{sidebarButtonInnerTurn: currentTurn, sidebarButtonInnerNotTurn: !currentTurn}"
+                class="sidebarButtonInner">{{playerID}}</div>
+            </button>
+            <div id="playerPiecesMenu" class="piecesMenu">
+              <button :id="piece.name" class="pieceButton playerPieceButton"
+                :class="{validPieceButton: validPieces.includes(piece.name), invalidPieceButton: !validPieces.includes(piece.name), currentPieceButton: currentPiece == piece.name}"
+                v-for="piece in pieceInfo" v-if="piece.playerAmount > 0" @click="selectPiece(piece.name)">
+                <figure class="pieceFigure">
+                  <span class="pieceImageContainer">
+                    <img :src="'resources/' + piece.name + '.png'" width="88px" height="88px" />
+                    <img class="pieceOutline" src="resources/playerOutline.png" width="88px" height="88px" />
+                  </span>
+                  <figcaption>{{piece.name}}</figcaption>
+                </figure>
+                <span class="piecesLeft">x{{piece.playerAmount}}</span>
+              </button>
+            </div>
+          </div>
+        </div>
+        <div id="opponentSidebarPositioner" class="opponentSidebarPositionerRetracted sidebarPositioner">
+          <div id="opponentSidebarContainer" class="opponentContainer">
+            <button id="opponentSidebarButton" class="sidebarButton" onclick="changeSidebar('opponent', 'toggle')">
+              <div :class="{sidebarButtonInnerTurn: !currentTurn, sidebarButtonInnerNotTurn: currentTurn}"
+                class="sidebarButtonInner">{{opponentID}}</div>
+            </button>
+            <div id="opponentPiecesMenu" class="piecesMenu">
+              <button class="pieceButton opponentPieceButton invalidPieceButton" v-for="piece in pieceInfo"
+                v-if="piece.opponentAmount > 0">
+                <figure class="pieceFigure">
+                  <span class="pieceImageContainer">
+                    <img :src="'resources/' + piece.name + '.png'" width="88px" height="88px" />
+                    <img class="pieceOutline" src="resources/opponentOutline.png" width="88px" height="88px" />
+                  </span>
+                  <figcaption>{{piece.name}}</figcaption>
+                </figure>
+                <span class="piecesLeft">x{{piece.opponentAmount}}</span>
+              </button>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</body>
+</html>
